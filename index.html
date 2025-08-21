@@ -318,11 +318,12 @@
             jdContent: '',
             conversationHistory: [],
             currentQuestion: 0,
-            totalQuestions: 10
+            totalQuestions: 10,
+            interviewStarted: false
         };
 
         // Your n8n webhook URL - replace with your actual webhook URL
-        const WEBHOOK_URL = 'https://swathigude.app.n8n.cloud/webhook-test/9e4437f9-7843-4a26-989d-35d2ce382b54';
+        const WEBHOOK_URL = 'https://swathigude.app.n8n.cloud/webhook-test/interview-webhook';
 
         function handleFileSelect(input, type) {
             const file = input.files[0];
@@ -381,6 +382,7 @@
                 interviewData.sessionId = result.sessionId || Date.now().toString();
                 interviewData.resumeContent = result.resumeContent || '';
                 interviewData.jdContent = result.jdContent || '';
+                interviewData.interviewStarted = true;
 
                 updateProgress(100);
                 showLoading(false);
@@ -389,8 +391,15 @@
                 document.getElementById('uploadSection').style.display = 'none';
                 document.getElementById('chatSection').style.display = 'block';
 
-                // Start with first AI question
-                await getNextQuestion();
+                // Add first AI question from the start_interview response
+                if (result.firstQuestion) {
+                    addMessage(result.firstQuestion, 'ai');
+                    interviewData.currentQuestion = 1;
+                    updateProgress((interviewData.currentQuestion / interviewData.totalQuestions) * 100);
+                } else {
+                    // Fallback: get first question
+                    await getNextQuestion();
+                }
 
             } catch (error) {
                 console.error('Error starting interview:', error);
@@ -400,6 +409,11 @@
         }
 
         async function getNextQuestion() {
+            if (!interviewData.interviewStarted) {
+                console.error('Interview not started yet');
+                return;
+            }
+
             try {
                 const response = await fetch(WEBHOOK_URL, {
                     method: 'POST',
@@ -407,7 +421,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        action: 'get_question',
+                        action: 'continue_interview', // Changed from 'get_question' to match workflow
                         sessionId: interviewData.sessionId,
                         conversationHistory: interviewData.conversationHistory,
                         resumeContent: interviewData.resumeContent,
@@ -451,14 +465,16 @@
             showTyping(true);
 
             try {
-                // Send response to n8n for processing
+                // Determine if we should continue interview or generate feedback
+                const shouldContinue = interviewData.currentQuestion < interviewData.totalQuestions;
+                
                 const response = await fetch(WEBHOOK_URL, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        action: 'process_answer',
+                        action: shouldContinue ? 'continue_interview' : 'generate_feedback', // Dynamic action
                         sessionId: interviewData.sessionId,
                         userAnswer: message,
                         conversationHistory: interviewData.conversationHistory,
@@ -471,21 +487,40 @@
                 const result = await response.json();
                 showTyping(false);
 
-                if (result.followUp) {
-                    // Add follow-up question
-                    setTimeout(() => addMessage(result.followUp, 'ai'), 1000);
-                    
-                    interviewData.conversationHistory.push({
-                        type: 'ai',
-                        message: result.followUp,
-                        timestamp: new Date().toISOString()
-                    });
-                } else if (interviewData.currentQuestion < interviewData.totalQuestions) {
-                    // Get next question
-                    setTimeout(() => getNextQuestion(), 2000);
+                if (shouldContinue) {
+                    // Continue interview flow
+                    if (result.followUp) {
+                        // Add follow-up question
+                        setTimeout(() => addMessage(result.followUp, 'ai'), 1000);
+                        
+                        interviewData.conversationHistory.push({
+                            type: 'ai',
+                            message: result.followUp,
+                            timestamp: new Date().toISOString()
+                        });
+                    } else if (result.nextQuestion) {
+                        // Add next question directly
+                        setTimeout(() => {
+                            addMessage(result.nextQuestion, 'ai');
+                            interviewData.currentQuestion++;
+                            updateProgress((interviewData.currentQuestion / interviewData.totalQuestions) * 100);
+                        }, 2000);
+                    } else {
+                        // Get next question
+                        setTimeout(() => getNextQuestion(), 2000);
+                    }
                 } else {
-                    // Interview complete
-                    setTimeout(() => completeInterview(), 2000);
+                    // Generate feedback flow
+                    if (result.feedback) {
+                        addMessage("Thank you for completing the interview! Here's your feedback...", 'ai');
+                        setTimeout(() => {
+                            document.getElementById('chatSection').style.display = 'none';
+                            showFeedback(result.feedback);
+                        }, 3000);
+                    } else {
+                        // Fallback to complete interview
+                        setTimeout(() => completeInterview(), 2000);
+                    }
                 }
 
             } catch (error) {
@@ -503,7 +538,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        action: 'complete_interview',
+                        action: 'generate_feedback', // Changed to match workflow
                         sessionId: interviewData.sessionId,
                         conversationHistory: interviewData.conversationHistory,
                         resumeContent: interviewData.resumeContent,
@@ -517,7 +552,16 @@
                 
                 setTimeout(() => {
                     document.getElementById('chatSection').style.display = 'none';
-                    showFeedback(result.feedback);
+                    if (result.feedback) {
+                        showFeedback(result.feedback);
+                    } else {
+                        showFeedback({
+                            overallScore: 'N/A',
+                            strengths: 'Thank you for completing the interview.',
+                            improvements: 'Feedback generation is in progress.',
+                            recommendations: 'Please try again later.'
+                        });
+                    }
                 }, 3000);
 
             } catch (error) {
